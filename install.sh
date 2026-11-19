@@ -18,7 +18,7 @@
 
 set -u
 
-VERSION=1.1.0
+VERSION=1.1.1
 SPOOF_VERSION=1.5.4
 SPOOF_SHA_arm64=92f7dd41c3b414865410c5cc8c845915375ace9d03a8cf15b23fc7374c354bc6
 SPOOF_SHA_x86_64=a39ad5361e3fe1a263cd4017583bc8ac4b8dbf6e4886f55ddeee0cfde3cf9255
@@ -177,6 +177,20 @@ wait_port() {
 
 online() { [[ $(curl -s -m 6 http://captive.apple.com/hotspot-detect.html 2>/dev/null) == *Success* ]] }
 
+# tcp_check <ip>: tries a TCP connection to port 443 of a public IP (no DNS involved) and
+# prints ok, refused, timeout, unreachable or the raw error. "refused" on a public IP
+# means something answers with a reset: a VPN/firewall app on this Mac, or the router.
+tcp_check() {
+  local out
+  out=$(nc -vz -G 4 $1 443 2>&1) && { print ok; return }
+  case ${out:l} in
+    *refused*) print refused ;;
+    *"timed out"*) print timeout ;;
+    *unreachable*|*"no route"*) print unreachable ;;
+    *) print -r -- "${out##*: }" ;;
+  esac
+}
+
 net_sig() {
   print -r -- "$(route -n get default 2>/dev/null | awk '/gateway:|interface:/{printf "%s ", $2}')$(scutil --dns 2>/dev/null | awk '/nameserver\[0\]/{print $3; exit}')"
 }
@@ -273,11 +287,21 @@ start_spoof() {
   return 1
 }
 
+restart_spoof() {
+  if [[ -n $SPOOF_PID ]]; then
+    kill $SPOOF_PID 2>/dev/null
+    sleep 1
+    kill -9 $SPOOF_PID 2>/dev/null
+    wait $SPOOF_PID 2>/dev/null
+  fi
+  start_spoof
+}
+
 # Re-picks a working strategy when Discord is unreachable through the live proxy.
 # With force=1 (startup, network change, Discord just opened) it does not wait out the
 # 5-minute limit between picks.
 health_check() {
-  local old new
+  local old new why
   trim_log "$LOG_DIR/spoofdpi.log"
   trim_log "$LOG_DIR/watch.log"
   if probe $PORT || { sleep 3; probe $PORT }; then
@@ -287,8 +311,11 @@ health_check() {
     return 0
   fi
   if ! online; then
-    (( offline )) || log "internet yok ya da ağ giriş sayfası istiyor; bekleniyor" \
-      "no internet, or the network wants a sign-in page; waiting"
+    if (( ! offline )); then
+      why=$(tcp_check 1.1.1.1)
+      log "internet yok ya da ağ giriş sayfası istiyor (1.1.1.1:443: $why); bekleniyor" \
+        "no internet, or the network wants a sign-in page (1.1.1.1:443: $why); waiting"
+    fi
     offline=1
     next_check=$(( EPOCHSECONDS + 15 ))
     return 1
@@ -307,11 +334,9 @@ health_check() {
     new=$(current_strategy)
     log "çalışan strateji: $new" "working strategy: $new"
     bad=0
-    if [[ $new != $old ]]; then
-      kill $SPOOF_PID 2>/dev/null
-      wait $SPOOF_PID 2>/dev/null
-      start_spoof
-    fi
+    # Restart even when the strategy is unchanged: the live SpoofDPI failed the probe
+    # while a fresh one with the same flags passed.
+    restart_spoof
   else
     (( bad )) || log "bu ağda hiçbir strateji çalışmadı" "no strategy worked on this network"
     bad=1
@@ -379,6 +404,7 @@ row() { print -r -- "$(t "$1" "$2"): $3" }
 # Writes the diagnostic details; fills in VERDICT and ADVICE.
 collect() {
   local cap internet agent listener s codes working="" live="" live_ok=1 h code app found=0 pids discord_proxy=""
+  local gw pg tcp1 tcp8 related
   local none=$(t yok none)
 
   t "== Genel ==" "== General =="
@@ -404,6 +430,29 @@ collect() {
   row "Ağ geçidi / arayüz" "Gateway / interface" "$(route -n get default 2>/dev/null | awk '/gateway:|interface:/{printf "%s ", $2}')"
   row "DNS sunucuları" "DNS servers" "$(scutil --dns 2>/dev/null | awk '/nameserver\[/{print $3}' | sort -u | tr '\n' ' ')"
   [[ $internet == ok ]] && row "Operatör" "ISP" "$(curl -s -m 6 https://ipinfo.io/org 2>/dev/null)"
+
+  # Runs even without internet: tells "refused" (something blocks) from "no connection".
+  section "Ham bağlantı (DNS'siz)" "Raw connectivity (no DNS)"
+  gw=$(route -n get default 2>/dev/null | awk '/gateway:/{print $2}')
+  if [[ -n $gw ]]; then
+    if ping -c 1 -t 2 $gw > /dev/null 2>&1; then pg=$(t "yanıt veriyor" "answers"); else pg=$(t "yanıt yok" "no answer"); fi
+    row "Ağ geçidi ping ($gw)" "Gateway ping ($gw)" "$pg"
+  else
+    row "Ağ geçidi" "Gateway" "$none"
+  fi
+  tcp1=$(tcp_check 1.1.1.1)
+  tcp8=$(tcp_check 8.8.8.8)
+  row "TCP 1.1.1.1:443" "TCP 1.1.1.1:443" "$tcp1"
+  row "TCP 8.8.8.8:443" "TCP 8.8.8.8:443" "$tcp8"
+  curl -s -o /dev/null -m 5 https://1.1.1.1 2>/dev/null
+  row "curl https://1.1.1.1 çıkış kodu (0 = tamam)" "curl https://1.1.1.1 exit code (0 = ok)" $?
+  curl -s -o /dev/null -m 6 http://captive.apple.com/hotspot-detect.html 2>/dev/null
+  row "curl captive.apple.com çıkış kodu (6 = DNS, 7 = bağlanamadı, 28 = zaman aşımı)" \
+    "curl captive.apple.com exit code (6 = DNS, 7 = could not connect, 28 = timeout)" $?
+  row "Sistem DNS'i apple.com" "System DNS for apple.com" "$(dig +short +time=3 +tries=1 apple.com 2>&1 | head -3 | tr '\n' ' ')"
+  t "Rotalar (varsayılan ve tünel):" "Routes (default and tunnel):"
+  netstat -rn -f inet 2>/dev/null | awk '$1 == "default" || $1 == "0/1" || $1 == "128.0/1" || $4 ~ /^utun/ {print "  " $1 " " $2 " " $4}' | head -20
+  row "Tünel arayüzleri" "Tunnel interfaces" "$(ifconfig -l 2>/dev/null | tr ' ' '\n' | grep '^utun' | tr '\n' ' ')"
 
   section "Servis" "Service"
   agent=$(launchctl print gui/$UID/$LABEL 2>/dev/null | awk '/^\tstate =|^\tpid =|^\truns =|^\tlast exit code =/{$1=$1; printf "%s; ", $0}')
@@ -438,7 +487,12 @@ collect() {
   section "Sistem proxy / VPN" "System proxy / VPN"
   scutil --proxy 2>/dev/null | grep -E 'Enable|Proxy|Port' | sed 's/^ */  /'
   row "VPN bağlantıları" "VPN connections" "$(scutil --nc list 2>/dev/null | grep -c '(Connected)')"
-  row "İlgili uygulamalar" "Related apps" "$(ps -axo comm= | grep -iE 'warp|vpn|wireguard|tailscale|outline|v2ray|clash|tunnelblick|sing-box|zapret' | xargs -n1 basename 2>/dev/null | sort -u | tr '\n' ' ')"
+  scutil --nc list 2>/dev/null | sed 's/^/  /'
+  related=$(ps -axo comm= | grep -iE 'warp|vpn|wireguard|tailscale|outline|v2ray|clash|tunnelblick|sing-box|zapret|little snitch|lulu' | awk -F/ '{print $NF}' | sort -u | paste -sd, -)
+  row "İlgili uygulamalar" "Related apps" "$related"
+  row "macOS güvenlik duvarı" "macOS firewall" "$(/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>&1 | head -1)"
+  t "Sistem uzantıları:" "System extensions:"
+  systemextensionsctl list 2>&1 | sed 's/^/  /' | head -30
 
   if [[ $internet == ok ]]; then
     section "DNS" "DNS"
@@ -473,7 +527,12 @@ collect() {
       "(DNS, reachability and strategy tests were skipped because there is no internet.)"
   fi
 
-  if [[ $internet == none ]]; then
+  if [[ $internet == none && ( $tcp1 == refused || $tcp8 == refused ) ]]; then
+    VERDICT=$(t "Bağlantılar reddediliyor (zaman aşımı değil): bu Mac'teki bir VPN/güvenlik duvarı uygulaması ya da modem engelliyor.${related:+ Çalışan: $related.}" \
+      "Connections are being refused (not timing out): a VPN/firewall app on this Mac, or the router, is blocking them.${related:+ Running: $related.}")
+    ADVICE=$(t "Çalışan VPN/güvenlik duvarı uygulamasından tamamen çık (ya da kill switch'ini kapat) ve tekrar dene; yoksa modemi yeniden başlat." \
+      "Quit the running VPN/firewall app completely (or turn off its kill switch) and try again; if there is none, restart the router.")
+  elif [[ $internet == none ]]; then
     VERDICT=$(t "İnternet bağlantısı yok." "No internet connection.")
     ADVICE=$(t "Wi-Fi/kablo bağlantısını kontrol et." "Check the Wi-Fi or cable connection.")
   elif [[ $internet == portal ]]; then

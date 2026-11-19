@@ -66,6 +66,7 @@ Run the install line again.
 | RESULT | Meaning |
 |---|---|
 | No internet connection / The network wants a sign-in page | Not our problem; it fixes itself once the Mac is online. |
+| Connections are being refused | Something answers with a reset instead of letting traffic out: usually a VPN/firewall app on the Mac (kill switch, dead tunnel) or the router. The "Raw connectivity" and "System proxy / VPN" sections show which. Restarting Discord DPI does not help. |
 | Broken install / The background service is not loaded | The install line must be run again. |
 | Another app is using port 8881 | The named app must be quit. |
 | The selected strategy fails but another one works | **Repair** fixes it; the service also switches by itself within 5 minutes. |
@@ -160,6 +161,7 @@ Kurulum satırını tekrar çalıştırmak yeterli.
 | SONUÇ | Anlamı |
 |---|---|
 | İnternet bağlantısı yok / Ağ bir giriş sayfası istiyor | Sorun bizde değil; Mac internete bağlanınca düzelir. |
+| Bağlantılar reddediliyor | Trafik dışarı çıkmak yerine reset ile yanıtlanıyor: genelde Mac'teki bir VPN/güvenlik duvarı uygulaması (kill switch, ölü tünel) ya da modem. Hangisi olduğunu "Ham bağlantı" ve "Sistem proxy / VPN" bölümleri gösterir. Discord DPI'yi yeniden başlatmak çözmez. |
 | Kurulum bozuk / Arka plan servisi yüklü değil | Kurulum satırı yeniden çalıştırılmalı. |
 | 8881 portunu başka bir uygulama kullanıyor | Adı yazan uygulama kapatılmalı. |
 | Seçili strateji çalışmıyor ama çalışan var | **Onar** düzeltir; servis de 5 dk içinde kendisi geçer. |
